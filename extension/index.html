@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>AutoCut Free</title>
+<style>
+  body { background:#232323; color:#ddd; font:12px Segoe UI, Arial, sans-serif; margin:0; padding:12px; }
+  h1 { font-size:14px; margin:0 0 10px; color:#ff4d4d; }
+  label { display:block; margin:8px 0 3px; color:#aaa; }
+  input[type=text], select, input[type=number] { width:100%; box-sizing:border-box; background:#333; color:#eee; border:1px solid #555; padding:5px; }
+  .row { display:flex; gap:6px; }
+  .row > * { flex:1; }
+  .chk { display:flex; align-items:center; gap:6px; margin:6px 0; color:#ddd; }
+  button { width:100%; margin-top:6px; padding:8px; background:#c0392b; border:0; color:#fff; font-weight:bold; cursor:pointer; }
+  button.sec { background:#444; font-weight:normal; margin-top:0; }
+  button:disabled { opacity:.5; cursor:default; }
+  #log { margin-top:10px; background:#1a1a1a; border:1px solid #444; padding:6px; height:110px; overflow:auto; white-space:pre-wrap; font:11px Consolas, monospace; }
+</style>
+</head>
+<body>
+  <h1>AutoCut Free</h1>
+
+  <label>Vídeo</label>
+  <div class="row">
+    <input type="text" id="video" placeholder="Escolha um arquivo...">
+    <button class="sec" id="btnPick" style="flex:0 0 70px">Abrir</button>
+  </div>
+  <button class="sec" id="btnActive" style="margin-top:6px">Usar clipe selecionado na timeline</button>
+
+  <label>Modo</label>
+  <select id="mode">
+    <option value="silence">Cortar silêncios</option>
+    <option value="highlights">Highlights de gameplay</option>
+  </select>
+
+  <div id="silenceOpts">
+    <div class="row">
+      <div><label>Limiar (dB ou auto)</label><input type="text" id="noise" value="auto"></div>
+      <div><label>Silêncio mín. (s)</label><input type="number" id="minsil" value="0.4" step="0.1"></div>
+    </div>
+  </div>
+  <div id="hlOpts" style="display:none">
+    <div class="row">
+      <div><label>Qtd. momentos</label><input type="number" id="top" value="10"></div>
+      <div><label>Antes/Depois (s)</label><input type="text" id="ba" value="6/4"></div>
+    </div>
+  </div>
+
+  <label>Faixa de áudio (0 = primeira)</label>
+  <input type="number" id="track" value="0" min="0">
+
+  <div class="chk"><input type="checkbox" id="zoom"><span>Zoom automático</span><input type="number" id="zoompct" value="112" min="101" max="300" style="width:64px;margin-left:auto"><span>%</span></div>
+  <div class="chk"><input type="checkbox" id="caps"><span>Legendas (.srt, Whisper local)</span></div>
+
+  <button id="btnRun">Cortar e importar</button>
+  <div id="log"></div>
+
+  <script src="./js/CSInterface.js"></script>
+  <script src="./js/main.js"></script>
+</body>
+</html>

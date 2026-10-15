@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.zip
+# arquivos gerados pelo AutoCut ao lado dos seus videos
+*_autocut.xml
+*_autocut.srt
+.DS_Store
+Thumbs.db
