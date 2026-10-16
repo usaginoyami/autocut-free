@@ -23,6 +23,10 @@ if not defined PY (
   echo Instalando Whisper ^(faster-whisper^)...
   %PY% -m pip install --upgrade pip
   %PY% -m pip install faster-whisper
+  nvidia-smi >nul 2>&1 && (
+    echo Placa NVIDIA detectada: instalando bibliotecas CUDA para acelerar as legendas...
+    %PY% -m pip install nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"
+  )
 )
 
 echo.

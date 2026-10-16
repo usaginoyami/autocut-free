@@ -13,6 +13,8 @@
   .chk { display:flex; align-items:center; gap:6px; margin:6px 0; color:#ddd; }
   button { width:100%; margin-top:6px; padding:8px; background:#c0392b; border:0; color:#fff; font-weight:bold; cursor:pointer; }
   button.sec { background:#444; font-weight:normal; margin-top:0; }
+  progress { width:100%; height:14px; accent-color:#e0453a; margin-top:8px; }
+  #stage { margin-top:4px; font-size:11px; color:#bbb; }
   button:disabled { opacity:.5; cursor:default; }
   #log { margin-top:10px; background:#1a1a1a; border:1px solid #444; padding:6px; height:110px; overflow:auto; white-space:pre-wrap; font:11px Consolas, monospace; }
 </style>
@@ -50,9 +52,28 @@
   <input type="number" id="track" value="0" min="0">
 
   <div class="chk"><input type="checkbox" id="zoom"><span>Zoom automático</span><input type="number" id="zoompct" value="112" min="101" max="300" style="width:64px;margin-left:auto"><span>%</span></div>
-  <div class="chk"><input type="checkbox" id="caps"><span>Legendas (.srt, Whisper local)</span></div>
+  <button id="btnRun">1. Cortar e importar</button>
 
-  <button id="btnRun">Cortar e importar</button>
+  <label>Legendas (Whisper local) — depois de cortar</label>
+  <div class="row">
+    <select id="model">
+      <option value="tiny">tiny (muito rápido)</option>
+      <option value="base" selected>base (rápido)</option>
+      <option value="small">small (preciso)</option>
+      <option value="medium">medium (GPU)</option>
+    </select>
+    <select id="dev">
+      <option value="auto" selected>Auto (GPU se tiver)</option>
+      <option value="cuda">Placa de vídeo</option>
+      <option value="cpu">Processador</option>
+    </select>
+  </div>
+  <button id="btnCaps">2. Gerar legendas</button>
+  <div id="prog" style="display:none">
+    <progress id="bar" max="100" value="0"></progress>
+    <div id="stage"></div>
+    <button class="sec" id="btnCancel" style="margin-top:6px">Cancelar</button>
+  </div>
   <div id="log"></div>
 
   <script src="./js/CSInterface.js"></script>

@@ -19,8 +19,46 @@ Exemplos:
   python autocut_free.py gameplay.mp4 --mode highlights --top 12
 Importar: Premiere -> File > Import  |  Resolve -> File > Import > Timeline
 """
-import argparse, json, os, re, subprocess, sys
+import argparse, json, math, os, re, subprocess, sys, tempfile, time
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+import glob, shutil
+
+
+def find_tool(name):
+    """Acha ffmpeg/ffprobe: PATH, depois pastas comuns do Windows (winget, choco, scoop...)."""
+    found = shutil.which(name)
+    if found:
+        return found
+    exe = name + (".exe" if os.name == "nt" else "")
+    cands = []
+    d = os.environ.get("AUTOCUT_FFMPEG_DIR")
+    if d:
+        cands.append(os.path.join(d, exe))
+    if os.name == "nt":
+        la = os.environ.get("LOCALAPPDATA", "")
+        pf = os.environ.get("ProgramFiles", "C:\\Program Files")
+        pd = os.environ.get("ProgramData", "C:\\ProgramData")
+        us = os.path.expanduser("~")
+        cands += [os.path.join(la, "Microsoft", "WinGet", "Links", exe),
+                  os.path.join("C:\\", "ffmpeg", "bin", exe),
+                  os.path.join(pf, "ffmpeg", "bin", exe),
+                  os.path.join(pd, "chocolatey", "bin", exe),
+                  os.path.join(us, "scoop", "shims", exe)]
+        cands += glob.glob(os.path.join(la, "Microsoft", "WinGet", "Packages", "*FFmpeg*", "**", exe),
+                           recursive=True)
+    for c in cands:
+        if os.path.isfile(c):
+            return c
+    return name
+
+
+FFMPEG = find_tool("ffmpeg")
+FFPROBE = find_tool("ffprobe")
+
+
+def emit(pct, text):
+    """Linha de progresso lida pelo painel: @@<percentual>|<texto>"""
+    print(f"@@{int(pct)}|{text}", flush=True)
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -30,7 +68,7 @@ def run(cmd):
 
 
 def probe(path):
-    r = run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+    r = run([FFPROBE, "-v", "error", "-select_streams", "v:0",
              "-show_entries", "stream=width,height,r_frame_rate",
              "-show_entries", "format=duration", "-of", "json", str(path)])
     j = json.loads(r.stdout)
@@ -40,24 +78,74 @@ def probe(path):
 
 
 # ---------- deteccao ----------
-def measure_volume(path, track):
-    """Retorna (mean_db, max_db) da faixa de audio, ou (None, None) se nao ha audio."""
-    r = run(["ffmpeg", "-hide_banner", "-nostats", "-i", str(path), "-map", f"0:a:{track}",
-             "-af", "volumedetect", "-vn", "-f", "null", "-"])
-    m = re.search(r"mean_volume: (-?[\d.]+) dB", r.stderr)
-    x = re.search(r"max_volume: (-?[\d.]+) dB", r.stderr)
-    if not m:
-        return None, None
-    return float(m.group(1)), float(x.group(1)) if x else None
+def analyze_audio(path, track, want_raw, total, lo=0, hi=100):
+    """UMA unica passada do FFmpeg: mede o volume (RMS a cada 0,1 s) e, se pedido,
+    ja grava o audio em 16 kHz mono para o Whisper. Emite progresso de verdade."""
+    tmp = tempfile.gettempdir()
+    rms_name = f"autocut_rms_{os.getpid()}.txt"
+    af = ("aformat=sample_fmts=s16:sample_rates=8000:channel_layouts=mono,asetnsamples=n=800:p=0,"
+          "astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level:file=" + rms_name)
+    cmd = [FFMPEG, "-y", "-nostdin", "-hide_banner", "-loglevel", "error", "-progress", "pipe:2", "-nostats",
+           "-i", str(path), "-map", f"0:a:{track}", "-vn", "-sn", "-dn", "-af", af, "-f", "null", "-"]
+    raw = None
+    if want_raw:
+        raw = os.path.join(tmp, f"autocut_{os.getpid()}.raw")
+        cmd += ["-map", f"0:a:{track}", "-vn", "-sn", "-dn", "-ac", "1", "-ar", "16000", "-f", "s16le", raw]
+    proc = subprocess.Popen(cmd, cwd=tmp, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                            text=True, encoding="utf-8", errors="ignore")
+    errs, last = [], -1
+    for line in proc.stderr:
+        line = line.strip()
+        if line.startswith("out_time_us="):
+            try:
+                sec = int(line.split("=", 1)[1]) / 1e6
+            except ValueError:
+                continue
+            pct = min(99, int(sec / total * 100)) if total > 0 else 0
+            if pct != last:
+                last = pct
+                emit(lo + (hi - lo) * pct / 100, f"Analisando o audio... {pct}%")
+        elif line and not re.match(r"^[A-Za-z_0-9]+=", line):
+            errs.append(line)
+    proc.wait()
+    rms_path = os.path.join(tmp, rms_name)
+    rms = []
+    if os.path.exists(rms_path):
+        with open(rms_path, encoding="utf-8", errors="ignore") as fh:
+            for v in re.findall(r"RMS_level=(\S+)", fh.read()):
+                try:
+                    x = float(v)
+                except ValueError:
+                    x = -120.0
+                rms.append(x if x > -120.0 else -120.0)
+        try:
+            os.remove(rms_path)
+        except OSError:
+            pass
+    if not rms:
+        sys.exit(f"ERRO: nao consegui ler a faixa de audio {track}. " + " | ".join(errs[-3:]))
+    return rms, raw
 
 
-def detect_silence(path, noise_db, min_sil, pad, total, track=0):
-    r = run(["ffmpeg", "-hide_banner", "-nostats", "-i", str(path), "-map", f"0:a:{track}",
-             "-af", f"silencedetect=noise={noise_db}dB:d={min_sil}", "-vn", "-f", "null", "-"])
-    starts = [float(x) for x in re.findall(r"silence_start: (-?[\d.]+)", r.stderr)]
-    ends = [float(x) for x in re.findall(r"silence_end: ([\d.]+)", r.stderr)]
-    starts = [max(0.0, x) for x in starts]
-    sil = list(zip(starts, ends + [total] * (len(starts) - len(ends))))
+def volume_stats(rms):
+    power = sum(10 ** (x / 10) for x in rms) / len(rms)
+    return (10 * math.log10(power) if power > 0 else -120.0), max(rms)
+
+
+STEP = 0.1  # segundos por medida de volume
+
+
+def detect_silence(rms, noise_db, min_sil, pad, total):
+    sil, run_start = [], None
+    for i, x in enumerate(rms + [0.0]):          # 0 dB no fim fecha o ultimo trecho
+        if x < noise_db:
+            if run_start is None:
+                run_start = i
+        elif run_start is not None:
+            s, e = run_start * STEP, min(i * STEP, total)
+            if e - s >= min_sil:
+                sil.append((s, e))
+            run_start = None
     keep, cur = [], 0.0
     for s, e in sil:
         if s - cur > 0.15:
@@ -68,33 +156,23 @@ def detect_silence(path, noise_db, min_sil, pad, total, track=0):
     return merge(keep)
 
 
-def detect_highlights(path, total, top, before, after, track=0):
-    # mede o volume (RMS) a cada 0.5s usando so o FFmpeg (sem numpy)
-    sr = 8000
-    r = run(["ffmpeg", "-hide_banner", "-nostats", "-i", str(path), "-map", f"0:a:{track}", "-vn",
-             "-af", f"aresample={sr},asetnsamples=n={sr // 2}:p=0,astats=metadata=1:reset=1,"
-                    "ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-",
-             "-f", "null", "-"])
-    vals = re.findall(r"lavfi\.astats\.Overall\.RMS_level=(-?[\d.]+|-?inf)", r.stdout)
-    rms = []
-    for v in vals:
-        try:
-            x = float(v)
-        except ValueError:
-            x = -120.0
-        rms.append(-120.0 if x != x or x == float("-inf") else x)
-    if not rms:
+def detect_highlights(rms, total, top, before, after):
+    group = 5                                      # janelas de 0,5 s
+    loud = []
+    for i in range(0, len(rms) - group + 1, group):
+        p = sum(10 ** (x / 10) for x in rms[i:i + group]) / group
+        loud.append(10 * math.log10(p) if p > 0 else -120.0)
+    if not loud:
         return [(0, total)]
-    order = sorted(range(len(rms)), key=lambda i: rms[i], reverse=True)
+    order = sorted(range(len(loud)), key=lambda i: loud[i], reverse=True)
     picked = []
     for i in order:
-        t = i * 0.5
+        t = i * group * STEP
         if all(abs(t - q) > (before + after) for q in picked):
             picked.append(t)
         if len(picked) >= top:
             break
-    segs = [(max(0, t - before), min(total, t + after)) for t in sorted(picked)]
-    return merge(segs)
+    return merge([(max(0, t - before), min(total, t + after)) for t in sorted(picked)])
 
 
 def merge(segs, gap=0.05):
@@ -114,49 +192,93 @@ def srt_time(t):
     return f"{h:02d}:{m:02d}:{int(s):02d},{int((s % 1) * 1000):03d}"
 
 
-def make_srt(path, segs, out, model_size, lang, track=0, device="cpu"):
-    """Transcreve so os trechos mantidos, usando o audio extraido pelo FFmpeg (sem depender do pacote av)."""
+def fmt_dur(sec):
+    sec = int(max(0, sec))
+    return f"{sec // 60}min{sec % 60:02d}s" if sec >= 60 else f"{sec}s"
+
+
+def setup_cuda_dlls():
+    """No Windows, acha as DLLs do cuBLAS/cuDNN instaladas via pip (pacotes nvidia-*)."""
+    try:
+        import site
+        bases = list(site.getsitepackages()) + [site.getusersitepackages()]
+    except Exception:
+        return
+    for b in bases:
+        for d in glob.glob(os.path.join(b, "nvidia", "*", "bin")):
+            try:
+                os.add_dll_directory(d)
+            except (AttributeError, OSError):
+                pass
+            os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+
+
+def pick_device(device):
+    if device != "auto":
+        return device
+    try:
+        setup_cuda_dlls()
+        import ctranslate2
+        return "cuda" if ctranslate2.get_cuda_device_count() > 0 else "cpu"
+    except Exception:
+        return "cpu"
+
+
+def make_srt(segs, out, model_size, lang, raw, device="auto", lo=15, hi=98):
+    """Transcreve de UMA vez so os trechos mantidos (ja emendados), usando o audio da passada unica."""
     try:
         import numpy as np
         from faster_whisper import WhisperModel
     except ImportError:
         print("! faster-whisper nao instalado neste Python (legendas puladas). Rode o install.bat de novo.")
         return
+    device = pick_device(device)
+    if device == "cuda":
+        setup_cuda_dlls()
     sr = 16000
-    p = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-map", f"0:a:{track}", "-vn",
-                        "-ac", "1", "-ar", str(sr), "-f", "f32le", "-"], capture_output=True)
-    audio = np.frombuffer(p.stdout, dtype=np.float32)
-    if audio.size == 0:
-        print("! Nao consegui extrair o audio para as legendas.")
+    data = np.memmap(raw, dtype=np.int16, mode="r")
+    parts = [np.asarray(data[int(s * sr):int(e * sr)]) for s, e in segs]
+    parts = [x for x in parts if x.size]
+    if not parts:
+        print("! Sem audio para transcrever.")
         return
-    print(f"Legendas: carregando modelo '{model_size}' (a 1a vez baixa o modelo)...")
+    audio = np.concatenate(parts).astype(np.float32) / 32768.0
+    dur = audio.size / sr
+    print(f"Legendas: {fmt_dur(dur)} de audio a transcrever (modelo '{model_size}', {device}).", flush=True)
+    emit(lo, f"Carregando o modelo '{model_size}' (na 1a vez ele baixa)...")
+
     def load(dev):
-        return WhisperModel(model_size, device=dev, compute_type="int8" if dev == "cpu" else "float16")
+        kw = {"cpu_threads": max(4, min(8, os.cpu_count() or 8))} if dev == "cpu" else {}
+        return WhisperModel(model_size, device=dev,
+                            compute_type="int8" if dev == "cpu" else "float16", **kw)
 
-    def transcribe_chunk(m, chunk):
-        tr, _ = m.transcribe(chunk, language=lang, vad_filter=True)
-        return [(sg.start, sg.end, sg.text.strip()) for sg in tr]  # consome aqui (execucao e preguicosa)
+    def transcribe(m, t_start):
+        tr, _ = m.transcribe(audio, language=lang, beam_size=1, best_of=1, temperature=0.0,
+                             vad_filter=True, condition_on_previous_text=False)
+        res, last = [], -1
+        for sg in tr:                                   # execucao preguicosa: o trabalho acontece aqui
+            res.append((sg.start, sg.end, sg.text.strip()))
+            frac = min(1.0, sg.end / dur)
+            pct = int(frac * 100)
+            if pct != last:
+                last = pct
+                el = time.time() - t_start
+                eta = f" - faltam ~{fmt_dur(el * (1 - frac) / frac)}" if frac > 0.03 else ""
+                emit(lo + (hi - lo) * frac, f"Legendas {pct}% ({fmt_dur(el)}{eta})")
+        return res
 
-    model = load(device)
-    lines, idx, acc = [], 1, 0.0
-    for n, (s, e) in enumerate(segs, 1):
-        chunk = audio[int(s * sr):int(e * sr)]
-        if chunk.size > sr // 5:
-            try:
-                res = transcribe_chunk(model, chunk)
-            except RuntimeError as err:
-                if device == "cpu":
-                    raise
-                print(f"! GPU falhou ({err}); usando CPU.")
-                device = "cpu"
-                model = load("cpu")
-                res = transcribe_chunk(model, chunk)
-            for st, en, text in res:
-                if text:
-                    lines.append(f"{idx}\n{srt_time(acc + st)} --> {srt_time(acc + en)}\n{text}\n")
-                    idx += 1
-        acc += e - s
-        print(f"Legendas: trecho {n}/{len(segs)}", flush=True)
+    t0 = time.time()
+    try:
+        res = transcribe(load(device), t0)
+    except Exception as err:
+        if device == "cpu":
+            raise
+        print(f"! GPU falhou ({err}); usando CPU (mais lento).", flush=True)
+        emit(lo, "GPU indisponivel, usando CPU...")
+        t0 = time.time()
+        res = transcribe(load("cpu"), t0)
+    lines = [f"{i}\n{srt_time(st)} --> {srt_time(en)}\n{tx}\n"
+             for i, (st, en, tx) in enumerate((r for r in res if r[2]), 1)]
     if not lines:
         Path(out).unlink(missing_ok=True)
         print("! Nenhuma fala detectada nos trechos mantidos: .srt nao foi criado. "
@@ -164,7 +286,7 @@ def make_srt(path, segs, out, model_size, lang, track=0, device="cpu"):
         return
     with open(out, "w", encoding="utf-8", newline="") as fh:
         fh.write("\r\n".join(l.replace("\n", "\r\n").rstrip("\r\n") + "\r\n" for l in lines))
-    print(f"Legendas: {idx - 1} falas -> {out}")
+    print(f"Legendas: {len(lines)} falas em {fmt_dur(time.time() - t0)} -> {out}")
 
 
 # ---------- xmeml ----------
@@ -178,7 +300,7 @@ def scale_filter(v):
 
 def audio_layout(path):
     """Canais de cada faixa de audio do arquivo, ex: [2, 2, 2]."""
-    r = run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=channels",
+    r = run([FFPROBE, "-v", "error", "-select_streams", "a", "-show_entries", "stream=channels",
              "-of", "json", str(path)])
     try:
         chans = [int(x.get("channels", 2)) for x in json.loads(r.stdout).get("streams", [])]
@@ -254,41 +376,62 @@ def main():
     ap.add_argument("--after", type=float, default=4)
     ap.add_argument("--zoom", action="store_true")
     ap.add_argument("--captions", action="store_true")
-    ap.add_argument("--model", default="small")
+    ap.add_argument("--model", default="base", help="tiny, base (padrao), small, medium")
     ap.add_argument("--lang", default="pt")
-    ap.add_argument("--device", default="cpu", choices=["cpu", "cuda"], help="cpu (padrao) ou cuda (GPU NVIDIA)")
+    ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"], help="auto (GPU NVIDIA se houver), cpu ou cuda")
+    ap.add_argument("--captions-only", action="store_true", help="so gera o .srt (a timeline ja foi criada antes)")
     a = ap.parse_args()
 
     v = Path(a.video)
     if not v.exists():
         sys.exit("Arquivo nao encontrado")
+    for tool in (FFMPEG, FFPROBE):
+        if not (os.path.isfile(tool) or shutil.which(tool)):
+            sys.exit("ERRO: FFmpeg nao encontrado. Instale com: winget install Gyan.FFmpeg "
+                     "e reinicie o Premiere (ele so enxerga programas instalados antes de abrir).")
+
+    t0 = time.time()
     w, h, fps, total = probe(v)
-    mean_db, max_db = measure_volume(v, a.track)
-    if mean_db is None:
-        sys.exit(f"ERRO: nao achei a faixa de audio {a.track} neste video.")
-    print(f"Audio faixa {a.track}: media {mean_db:.1f} dB, pico {max_db} dB")
-    if max_db is not None and max_db < -60:
-        sys.exit("ERRO: essa faixa de audio esta praticamente muda. Tente outra faixa (--track 1, 2...).")
+    emit(0, "Lendo o audio do video...")
+    a.captions = a.captions or a.captions_only
+    hi = 15 if a.captions else 92
+    rms, raw = analyze_audio(v, a.track, a.captions, total, 0, hi)
+    mean_db, max_db = volume_stats(rms)
+    print(f"Audio faixa {a.track}: media {mean_db:.1f} dB, pico {max_db:.1f} dB ({time.time() - t0:.0f}s)")
+    try:
+        if max_db < -60:
+            sys.exit("ERRO: essa faixa de audio esta praticamente muda. Tente outra faixa (--track 1, 2...).")
 
-    if a.mode == "silence":
-        noise = (min(-25.0, max(-60.0, mean_db - 12)) if str(a.noise).lower() == "auto"
-                 else float(a.noise))
-        print(f"Limiar de silencio: {noise:.0f} dB")
-        segs = detect_silence(v, noise, a.min_silence, a.pad, total, a.track)
-    else:
-        segs = detect_highlights(v, total, a.top, a.before, a.after, a.track)
-    if not segs:
-        sys.exit("ERRO: 0 cortes. Tente outra faixa de audio (--track) ou um limiar menor (ex: --noise -50).")
-    chans = audio_layout(v)
-    print(f"Faixas de audio no arquivo: {len(chans)} ({chans})")
-    kept = sum(e - s for s, e in segs)
-    print(f"{len(segs)} cortes | {total:.0f}s -> {kept:.0f}s")
+        if a.mode == "silence":
+            noise = (min(-25.0, max(-60.0, mean_db - 12)) if str(a.noise).lower() == "auto"
+                     else float(a.noise))
+            print(f"Limiar de silencio: {noise:.0f} dB")
+            segs = detect_silence(rms, noise, a.min_silence, a.pad, total)
+        else:
+            segs = detect_highlights(rms, total, a.top, a.before, a.after)
+        if not segs:
+            sys.exit("ERRO: 0 cortes. Tente outra faixa de audio (--track) ou um limiar menor (ex: --noise -50).")
 
-    out = v.with_name(v.stem + "_autocut.xml")
-    out.write_text(build_xml(v, segs, w, h, fps, total, a.zoom, v.stem + "_autocut", chans), encoding="utf-8")
-    print("Timeline:", out)
-    if a.captions:
-        make_srt(v, segs, v.with_name(v.stem + "_autocut.srt"), a.model, a.lang, a.track, a.device)
+        kept = sum(e - s for s, e in segs)
+        print(f"{len(segs)} cortes | {total:.0f}s -> {kept:.0f}s")
+        if not a.captions_only:
+            emit(hi, "Gerando a timeline...")
+            chans = audio_layout(v)
+            print(f"Faixas de audio no arquivo: {len(chans)} ({chans})")
+            out = v.with_name(v.stem + "_autocut.xml")
+            out.write_text(build_xml(v, segs, w, h, fps, total, a.zoom, v.stem + "_autocut", chans),
+                           encoding="utf-8")
+            print("Timeline:", out)
+        if a.captions:
+            make_srt(segs, v.with_name(v.stem + "_autocut.srt"), a.model, a.lang, raw, a.device)
+        emit(100, "Concluido")
+        print(f"Concluido em {fmt_dur(time.time() - t0)}")
+    finally:
+        if raw and os.path.exists(raw):
+            try:
+                os.remove(raw)
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":
