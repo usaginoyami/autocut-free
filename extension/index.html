@@ -68,6 +68,22 @@
       <option value="cpu">Processador</option>
     </select>
   </div>
+  <select id="captype" style="margin-top:6px">
+    <option value="anim" selected>Animada (estilo TikTok, palavra a palavra)</option>
+    <option value="srt">Padrão (.srt)</option>
+  </select>
+  <div id="animOpts" class="row" style="margin-top:6px">
+    <select id="style">
+      <option value="amarelo" selected>Destaque amarelo</option>
+      <option value="vermelho">Destaque vermelho</option>
+      <option value="verde">Destaque verde</option>
+      <option value="ciano">Destaque ciano</option>
+    </select>
+    <select id="pos">
+      <option value="baixo" selected>Embaixo</option>
+      <option value="meio">No meio</option>
+    </select>
+  </div>
   <button id="btnCaps">2. Gerar legendas</button>
   <div id="prog" style="display:none">
     <progress id="bar" max="100" value="0"></progress>

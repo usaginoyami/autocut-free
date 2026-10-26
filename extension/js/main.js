@@ -189,29 +189,35 @@
     });
   };
 
+  $("captype").onchange = function () {
+    $("animOpts").style.display = this.value === "anim" ? "flex" : "none";
+  };
+
   // 2) Legendas (separado): refaz a analise (segundos) e transcreve so os trechos mantidos
   $("btnCaps").onclick = function () {
     var video = checkVideo(); if (!video) return;
     var path = nodeRequire("path"), fs = nodeRequire("fs");
     var parsed = path.parse(video);
-    var srt = path.join(parsed.dir, parsed.name + "_autocut.srt");
+    var anim = $("captype").value === "anim";
+    var outFile = path.join(parsed.dir, parsed.name + (anim ? "_autocut_anim.mov" : "_autocut.srt"));
     var seqName = parsed.name + "_autocut";
-    try { fs.unlinkSync(srt); } catch (e) {}
-    log("Gerando legendas (modelo " + $("model").value + ", " + $("dev").value + ")...");
+    try { fs.unlinkSync(outFile); } catch (e) {}
+    log("Gerando legendas " + (anim ? "animadas" : "") + " (modelo " + $("model").value + ", " + $("dev").value + ")...");
     var args = baseArgs(video).concat(["--captions-only", "--model", $("model").value, "--device", $("dev").value]);
+    if (anim) args.push("--animated", "--style", $("style").value, "--pos", $("pos").value);
     runScript(args, function () {
-      if (!fs.existsSync(srt)) { endStage("Sem legendas"); log("Nenhuma fala detectada nos trechos."); return; }
+      if (!fs.existsSync(outFile)) { endStage("Sem legendas"); log("Nenhuma fala detectada nos trechos."); return; }
       setBar(100, "Aplicando legendas no Premiere...");
-      imp(srt).then(function (r2) {
-        log("Legendas importadas: " + r2);
-        return evalJSX("applyCaptions(" + JSON.stringify(seqName) + "," + JSON.stringify(srt) + ")");
+      imp(outFile).then(function (r2) {
+        log("Importado: " + r2);
+        return evalJSX((anim ? "placeOverlay(" : "applyCaptions(") + JSON.stringify(seqName) + "," + JSON.stringify(outFile) + ")");
       }).then(function (r3) {
         if (r3 === "ok") {
-          log("Legendas aplicadas na sequência '" + seqName + "'.");
+          log("Legendas aplicadas na sequência '" + seqName + "'" + (anim ? " (faixa V2)." : "."));
         } else {
-          log("Não consegui aplicar as legendas sozinho: " + r3);
-          log("Manual: arraste o .srt do painel Projeto para a timeline.");
-          log("Arquivo: " + srt);
+          log("Não consegui aplicar sozinho: " + r3);
+          log("Manual: arraste o arquivo do painel Projeto para a timeline" + (anim ? " (V2, no início)." : "."));
+          log("Arquivo: " + outFile);
         }
         endStage("Concluído");
       });

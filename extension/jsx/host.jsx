@@ -103,3 +103,32 @@ function applyZoom(seqName, percent) {
     return "erro: " + e;
   }
 }
+
+
+// ---- Legenda animada: poe o video com transparencia na V2, no inicio da sequencia ----
+function placeOverlay(seqName, movPath) {
+  try {
+    var seq = null;
+    for (var i = 0; i < app.project.sequences.numSequences; i++) {
+      if (app.project.sequences[i].name === seqName) { seq = app.project.sequences[i]; break; }
+    }
+    if (!seq) { return "sequencia '" + seqName + "' nao encontrada"; }
+    app.project.openSequence(seq.sequenceID);
+    var item = _findItemByPath(app.project.rootItem, movPath);
+    if (!item) { return "video da legenda nao encontrado no projeto"; }
+    if (seq.videoTracks.numTracks < 2) {
+      try {
+        app.enableQE();
+        var q = qe.project.getActiveSequence();
+        q.addTracks(1, seq.videoTracks.numTracks, 0);
+      } catch (e1) {}
+    }
+    if (seq.videoTracks.numTracks < 2) { return "a sequencia so tem a faixa V1 (nao consegui criar a V2)"; }
+    var t = new Time();
+    t.seconds = 0;
+    seq.videoTracks[1].overwriteClip(item, t);
+    return seq.videoTracks[1].clips.numItems > 0 ? "ok" : "o Premiere nao colocou o clipe na V2";
+  } catch (e) {
+    return "erro: " + e;
+  }
+}

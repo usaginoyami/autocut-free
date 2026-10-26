@@ -11,6 +11,7 @@ gera legendas com Whisper (local) e aplica zoom automático. Feito para uso pess
 - **Highlights de gameplay**: pega os momentos mais altos do áudio, com tempo antes/depois configurável.
 - **Mantém todas as faixas de áudio** do arquivo (ex.: mistura, microfone, jogo), cada uma na sua trilha.
 - **Legendas** com [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (só transcreve os trechos mantidos); gera um `.srt` e tenta aplicar na sequência.
+- **Legendas animadas** estilo TikTok: palavras em maiúsculas, a palavra falada muda de cor e "pula". São renderizadas como um vídeo com transparência (`_autocut_anim.mov`) e colocadas na faixa V2.
 - **Zoom automático**: alterna a Escala (Movimento) entre 100% e X% (padrão 112%) a cada corte.
 - Gera uma **sequência nova** `<video>_autocut` no projeto. O vídeo original não é alterado.
 
@@ -35,7 +36,8 @@ Para desinstalar: apague a pasta `%APPDATA%\Adobe\CEP\extensions\AutoCutFree`.
 
 1. Escolha o vídeo (**Abrir**) ou use **Usar clipe selecionado na timeline**.
 2. Escolha o modo e a **faixa de áudio** (0 = primeira). Para cortar silêncio e legendar, use a faixa do **microfone**.
-3. Marque zoom e/ou legendas e clique em **Cortar e importar**.
+3. Marque o zoom se quiser e clique em **1. Cortar e importar** (leva segundos).
+4. Depois, escolha o tipo de legenda (animada ou `.srt`), o modelo e clique em **2. Gerar legendas**.
 
 ### Linha de comando (sem o Premiere)
 
@@ -54,7 +56,7 @@ Opções: `--noise auto|-35`, `--min-silence 0.4`, `--pad 0.08`, `--track N`, `-
 - O painel cria uma sequência nova; não corta uma sequência que você já editou.
 - O highlights usa só volume do áudio (não analisa a imagem).
 - O zoom é fixo e centralizado (sem rastrear rosto/ação).
-- Aplicar legendas por script depende da versão do Premiere; se falhar, arraste o `.srt` para a timeline.
+- Aplicar legendas por script depende da versão do Premiere; se falhar, arraste o `.srt` (ou o `_autocut_anim.mov`, na V2) para a timeline.
 - Whisper roda na CPU por padrão (`--device cuda` exige as bibliotecas CUDA instaladas).
 - O instalador é só para Windows.
 

@@ -224,7 +224,7 @@ def pick_device(device):
         return "cpu"
 
 
-def make_srt(segs, out, model_size, lang, raw, device="auto", lo=15, hi=98):
+def make_srt(segs, out, model_size, lang, raw, device="auto", lo=15, hi=98, words_out=None, write_srt=True):
     """Transcreve de UMA vez so os trechos mantidos (ja emendados), usando o audio da passada unica."""
     try:
         import numpy as np
@@ -254,10 +254,16 @@ def make_srt(segs, out, model_size, lang, raw, device="auto", lo=15, hi=98):
 
     def transcribe(m, t_start):
         tr, _ = m.transcribe(audio, language=lang, beam_size=1, best_of=1, temperature=0.0,
-                             vad_filter=True, condition_on_previous_text=False)
+                             vad_filter=True, condition_on_previous_text=False,
+                             word_timestamps=words_out is not None)
         res, last = [], -1
+        if words_out is not None:
+            del words_out[:]
         for sg in tr:                                   # execucao preguicosa: o trabalho acontece aqui
             res.append((sg.start, sg.end, sg.text.strip()))
+            if words_out is not None:
+                for wd in (sg.words or []):
+                    words_out.append((wd.start, wd.end, wd.word.strip()))
             frac = min(1.0, sg.end / dur)
             pct = int(frac * 100)
             if pct != last:
@@ -277,6 +283,9 @@ def make_srt(segs, out, model_size, lang, raw, device="auto", lo=15, hi=98):
         emit(lo, "GPU indisponivel, usando CPU...")
         t0 = time.time()
         res = transcribe(load("cpu"), t0)
+    if not write_srt:
+        print(f"Legendas: {len(res)} falas, {len(words_out or [])} palavras em {fmt_dur(time.time() - t0)}")
+        return
     lines = [f"{i}\n{srt_time(st)} --> {srt_time(en)}\n{tx}\n"
              for i, (st, en, tx) in enumerate((r for r in res if r[2]), 1)]
     if not lines:
@@ -287,6 +296,112 @@ def make_srt(segs, out, model_size, lang, raw, device="auto", lo=15, hi=98):
     with open(out, "w", encoding="utf-8", newline="") as fh:
         fh.write("\r\n".join(l.replace("\n", "\r\n").rstrip("\r\n") + "\r\n" for l in lines))
     print(f"Legendas: {len(lines)} falas em {fmt_dur(time.time() - t0)} -> {out}")
+
+
+# ---------- legendas animadas (overlay com transparencia) ----------
+STYLE_COLORS = {            # BGR para o ASS
+    "amarelo": "00FFFF", "vermelho": "3A45E0", "verde": "00E060", "ciano": "FFFF00",
+}
+
+
+def ass_time(t):
+    t = max(0.0, t)
+    cs = int(round(t * 100))
+    return f"{cs // 360000}:{cs // 6000 % 60:02d}:{cs // 100 % 60:02d}.{cs % 100:02d}"
+
+
+def make_ass(words, out, w, h, style="amarelo", pos="baixo", per_group=3):
+    """Estilo TikTok: grupos de ate 3 palavras em MAIUSCULAS; a palavra falada ganha cor e 'pula'."""
+    hl = STYLE_COLORS.get(style, STYLE_COLORS["amarelo"])
+    fs = int(min(w, h) * 0.08)
+    maxch = max(8, int(w * 0.8 / (fs * 0.7)))
+    clean = []
+    for st, en, tx in words:
+        tx = re.sub(r"[.,;:\u2026\"'()\[\]{}\\]", "", tx).strip().upper()
+        if tx:
+            clean.append((st, max(en, st + 0.05), tx))
+    groups, cur = [], []
+    for wd in clean:
+        if cur:
+            too_long = len(" ".join(x[2] for x in cur + [wd])) > maxch
+            gap = wd[0] - cur[-1][1] > 0.6
+            if len(cur) >= per_group or too_long or gap or cur[-1][2][-1:] in "?!":
+                groups.append(cur)
+                cur = []
+        cur.append(wd)
+    if cur:
+        groups.append(cur)
+
+    align, mv = (2, int(h * 0.16)) if pos == "baixo" else (5, 0)
+    head = (f"[Script Info]\nScriptType: v4.00+\nPlayResX: {w}\nPlayResY: {h}\nWrapStyle: 2\n\n"
+            f"[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
+            f"BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, "
+            f"Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+            f"Style: Default,Arial Black,{fs},&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,"
+            f"{max(3, fs // 12)},{max(1, fs // 30)},{align},40,40,{mv},1\n\n"
+            f"[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
+    ev = []
+    for gi, g in enumerate(groups):
+        nxt = groups[gi + 1][0][0] if gi + 1 < len(groups) else None
+        for i, (st, en, tx) in enumerate(g):
+            if i + 1 < len(g):
+                end = g[i + 1][0]
+            else:
+                end = en + 0.25
+                if nxt is not None:
+                    end = min(end, nxt)
+            parts = []
+            for j, (_, _, t2) in enumerate(g):
+                if j == i:
+                    parts.append("{\\c&H" + hl + "&\\fscx85\\fscy85\\t(0,90,\\fscx112\\fscy112)"
+                                 "\\t(90,170,\\fscx100\\fscy100)}" + t2 + "{\\r}")
+                else:
+                    parts.append(t2)
+            ev.append(f"Dialogue: 0,{ass_time(st)},{ass_time(end)},Default,,0,0,0,,{' '.join(parts)}")
+    with open(out, "w", encoding="utf-8") as fh:
+        fh.write(head + "\n".join(ev) + "\n")
+    return len(groups)
+
+
+def render_overlay(ass_path, out, w, h, fps, dur, lo=80, hi=99):
+    """Video com canal alfa (codec Animation/qtrle, leve e rapido) so com as legendas, para por na V2.
+    O filtro 'ass' nao escreve alfa, entao renderiza 2x: cores (fundo preto) e uma mascara branca."""
+    tmp = tempfile.gettempdir()
+    pid = os.getpid()
+    fa, fm = f"autocut_{pid}_c.ass", f"autocut_{pid}_m.ass"
+    txt = Path(ass_path).read_text(encoding="utf-8")
+    Path(tmp, fa).write_text(txt, encoding="utf-8")
+    mask = re.sub(r"&H([0-9A-Fa-f]{2})[0-9A-Fa-f]{6}(?![0-9A-Fa-f&])", r"&H\1FFFFFF", txt)
+    mask = re.sub(r"&H[0-9A-Fa-f]{6}&", "&HFFFFFF&", mask)
+    Path(tmp, fm).write_text(mask, encoding="utf-8")
+    src = f"color=c=black:s={w}x{h}:r={fps:.5f}:d={dur:.3f},format=rgba"
+    fc = f"{src},ass={fa}[c];{src},ass={fm},format=gray[m];[c][m]alphamerge,format=argb"
+    cmd = [FFMPEG, "-y", "-nostdin", "-hide_banner", "-loglevel", "error", "-progress", "pipe:2", "-nostats",
+           "-filter_complex", fc, "-c:v", "qtrle", "-pix_fmt", "argb", str(out)]
+    proc = subprocess.Popen(cmd, cwd=tmp, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                            text=True, encoding="utf-8", errors="ignore")
+    errs, last = [], -1
+    for line in proc.stderr:
+        line = line.strip()
+        if line.startswith("out_time_us="):
+            try:
+                sec = int(line.split("=", 1)[1]) / 1e6
+            except ValueError:
+                continue
+            pct = min(99, int(sec / dur * 100)) if dur > 0 else 0
+            if pct != last:
+                last = pct
+                emit(lo + (hi - lo) * pct / 100, f"Criando a legenda animada... {pct}%")
+        elif line and not re.match(r"^[A-Za-z_0-9]+=", line):
+            errs.append(line)
+    proc.wait()
+    for f in (fa, fm):
+        try:
+            os.remove(os.path.join(tmp, f))
+        except OSError:
+            pass
+    if proc.returncode != 0 or not os.path.exists(out):
+        sys.exit("ERRO ao criar a legenda animada: " + " | ".join(errs[-3:]))
 
 
 # ---------- xmeml ----------
@@ -379,6 +494,9 @@ def main():
     ap.add_argument("--model", default="base", help="tiny, base (padrao), small, medium")
     ap.add_argument("--lang", default="pt")
     ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"], help="auto (GPU NVIDIA se houver), cpu ou cuda")
+    ap.add_argument("--animated", action="store_true", help="legenda animada (overlay .mov com alfa) em vez de .srt")
+    ap.add_argument("--style", default="amarelo", choices=list(STYLE_COLORS), help="cor de destaque da palavra")
+    ap.add_argument("--pos", default="baixo", choices=["baixo", "meio"])
     ap.add_argument("--captions-only", action="store_true", help="so gera o .srt (a timeline ja foi criada antes)")
     a = ap.parse_args()
 
@@ -393,7 +511,7 @@ def main():
     t0 = time.time()
     w, h, fps, total = probe(v)
     emit(0, "Lendo o audio do video...")
-    a.captions = a.captions or a.captions_only
+    a.captions = a.captions or a.captions_only or a.animated
     hi = 15 if a.captions else 92
     rms, raw = analyze_audio(v, a.track, a.captions, total, 0, hi)
     mean_db, max_db = volume_stats(rms)
@@ -422,7 +540,23 @@ def main():
             out.write_text(build_xml(v, segs, w, h, fps, total, a.zoom, v.stem + "_autocut", chans),
                            encoding="utf-8")
             print("Timeline:", out)
-        if a.captions:
+        if a.animated:
+            words = []
+            make_srt(segs, None, a.model, a.lang, raw, a.device, hi=80, words_out=words, write_srt=False)
+            if not words:
+                print("! Nenhuma fala detectada: legenda animada nao criada. "
+                      "Dica: use a faixa do microfone (--track 1).")
+            else:
+                ass = os.path.join(tempfile.gettempdir(), f"autocut_{os.getpid()}_final.ass")
+                n = make_ass(words, ass, w, h, a.style, a.pos)
+                mov = v.with_name(v.stem + "_autocut_anim.mov")
+                render_overlay(ass, mov, w, h, fps, kept, 80, 99)
+                try:
+                    os.remove(ass)
+                except OSError:
+                    pass
+                print(f"Legenda animada: {n} grupos -> {mov}")
+        elif a.captions:
             make_srt(segs, v.with_name(v.stem + "_autocut.srt"), a.model, a.lang, raw, a.device)
         emit(100, "Concluido")
         print(f"Concluido em {fmt_dur(time.time() - t0)}")
